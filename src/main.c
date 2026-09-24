@@ -264,7 +264,9 @@ int main(void)  {
 
         //configure sensors
         configure_bma400();
+        k_msleep(100);
         configure_bno055();
+        k_msleep(100);
 
         //configure leds and interrupt
        

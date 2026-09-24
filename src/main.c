@@ -2,8 +2,6 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/gpio.h>
 
-
-
 //REGISTERS
 
 //bma400
@@ -47,9 +45,65 @@ static const struct gpio_dt_spec bma400_int_pin = GPIO_DT_SPEC_GET(BMA400_INT_NO
 static const struct i2c_dt_spec bno055 = I2C_DT_SPEC_GET(BNO055_NODELABEL);
 static const struct i2c_dt_spec bma400 = I2C_DT_SPEC_GET(BMA400_NODELABEL);
 
+//BNO055 semaphore
+K_SEM_DEFINE(bno055_sem, 0, 1);
+
+
+//app state enum
+enum APP_STATE {
+        APP_STATE_IDLE,
+        APP_STATE_BNO055_ACTIVATED,
+        APP_STATE_BLE_SENDING_DATA
+};
+
+static volatile enum APP_STATE app_state = APP_STATE_IDLE;
+
 
 //work struct
 struct k_work unlatch_work;
+
+
+//LED helper functions
+void turn_led_off() {
+        //turn all colors off
+        gpio_pin_set_dt(&redled, 0);
+        gpio_pin_set_dt(&greenled, 0);
+        gpio_pin_set_dt(&blueled, 0);
+}
+
+void turn_led_on(char color) {
+        switch (color)
+        {
+        case 'R':
+                gpio_pin_set_dt(&redled, 1);
+                gpio_pin_set_dt(&greenled, 0);
+                gpio_pin_set_dt(&blueled, 0);
+                break;
+        
+        case 'G':
+                gpio_pin_set_dt(&redled, 0);
+                gpio_pin_set_dt(&greenled, 1);
+                gpio_pin_set_dt(&blueled, 0);
+                break;
+        
+        case 'B':
+                gpio_pin_set_dt(&redled, 0);
+                gpio_pin_set_dt(&greenled, 0);
+                gpio_pin_set_dt(&blueled, 1);
+                break;
+
+        default:
+                break;
+        }
+}
+
+//define timer and expiry function
+void ble_timer_handler(struct k_timer *timer) {
+        turn_led_off();
+        app_state = APP_STATE_IDLE;
+}
+
+K_TIMER_DEFINE(ble_timer, ble_timer_handler, NULL);
 
 void unlatch_interrupt()
 {
@@ -57,18 +111,29 @@ void unlatch_interrupt()
         uint8_t read_data;
         i2c_write_read_dt(&bma400, &addr, 1, &read_data, 1);
 
-        if (read_data == 0x08)
-        {
-                printk("This really is a double tap!\n");
-        }
-        else
-        {
-                printk("Read something else... value:%.2X", read_data);
-        }
+        // if (read_data == 0x08)
+        // {
+        //         printk("This really is a double tap!\n");
+        // }
+        // else
+        // {
+        //         printk("Read something else... value:%.2X", read_data);
+        // }
 }
 
 void work_handler(struct k_work *work) {
         unlatch_interrupt();
+        //turn green LED on and activate BNO055
+        if(app_state == APP_STATE_IDLE) {
+                k_sem_give(&bno055_sem);
+                app_state = APP_STATE_BNO055_ACTIVATED;
+                turn_led_on('G');
+        
+        //turn LED off and make app idle
+        } else if (app_state == APP_STATE_BNO055_ACTIVATED) {
+                app_state = APP_STATE_IDLE;
+                turn_led_off();
+        }
 }
 
 
@@ -83,7 +148,6 @@ void bma400_interrupt_handler(
         const struct device *port,
         struct gpio_callback *cb,
         gpio_port_pins_t pins) {
-      printk("Double tap has been registered!\n");
       k_work_submit(&unlatch_work);
 }
 
@@ -100,7 +164,6 @@ int configure_bma400()
         ret = i2c_burst_write_dt(&bma400, REG_ACC_CONFIG0, &data, 1);
         if (ret)
         {
-                printk("There was an error writing a register\n");
                 return ret;
         }
 
@@ -109,7 +172,6 @@ int configure_bma400()
         ret = i2c_burst_write_dt(&bma400, REG_ACC_CONFIG1, &data, 1);
         if (ret)
         {
-                printk("There was an error writing a register\n");
                 return ret;
         }
 
@@ -118,7 +180,6 @@ int configure_bma400()
         ret = i2c_burst_write_dt(&bma400, REG_ACC_CONFIG2, &data, 1);
         if (ret)
         {
-                printk("There was an error writing a register\n");
                 return ret;
         }
 
@@ -128,7 +189,6 @@ int configure_bma400()
         ret = i2c_burst_write_dt(&bma400, REG_TAP_CONFIG, &data, 1);
         if (ret)
         {
-                printk("There was an error writing a register\n");
                 return ret;
         }
 
@@ -137,7 +197,6 @@ int configure_bma400()
         ret = i2c_burst_write_dt(&bma400, REG_TAP_CONFIG1, &data, 1);
         if (ret)
         {
-                printk("There was an error writing a register\n");
                 return ret;
         }
 
@@ -146,7 +205,6 @@ int configure_bma400()
         ret = i2c_burst_write_dt(&bma400, REG_INT_CONFIG1, &data, 1);
         if (ret)
         {
-                printk("There was an error writing a register\n");
                 return ret;
         }
 
@@ -155,7 +213,6 @@ int configure_bma400()
         ret = i2c_burst_write_dt(&bma400, REG_INT12_MAP, &data, 1);
         if (ret)
         {
-                printk("There was an error writing a register\n");
                 return ret;
         }
 
@@ -175,25 +232,21 @@ int configure_leds_interrupt() {
         int ret = 0;
         ret = gpio_pin_configure_dt(&redled, GPIO_OUTPUT_INACTIVE);
         if(ret){
-                printk("Could not perform setup for red LED: %d", ret);
                 return ret;
         }
 
         ret = gpio_pin_configure_dt(&greenled, GPIO_OUTPUT_INACTIVE);
         if(ret) {
-                printk("Could not perform setup for green LED: %d", ret);
                 return ret;
         }
 
         ret = gpio_pin_configure_dt(&blueled, GPIO_OUTPUT_INACTIVE);
         if(ret) {
-                printk("Could not perform setup for blue LED: %d", ret);
                 return ret;
         }
 
         ret = gpio_pin_configure_dt(&bma400_int_pin, GPIO_INPUT);
          if(ret) {
-                printk("Could not set interrupt pin: %d", ret);
                 return ret;
         }
         gpio_pin_interrupt_configure_dt(&bma400_int_pin, GPIO_INT_EDGE_TO_ACTIVE);
@@ -217,20 +270,75 @@ int main(void)  {
        
         ret = configure_leds_interrupt();
         if(ret) {
-                printk("There was some error configuring LEDs: %d \n", ret);
                 return ret;
-        } else {
-                printk("LEDs and interrupt pin have been successfully setup \n");
-        }
-
+        } 
 
         //register interrupt handler with the callback
         gpio_init_callback(&bma400_int_cb, bma400_interrupt_handler, BIT(bma400_int_pin.pin));
         gpio_add_callback_dt(&bma400_int_pin, &bma400_int_cb);
 
 
-   
-
-
         return 0;
 }
+
+
+
+//BNO055 thread
+void bno055_thread_handler() {
+        while (true) {
+                k_sem_take(&bno055_sem, K_FOREVER);
+
+                while (app_state == APP_STATE_BNO055_ACTIVATED) {
+                        //read sensor data
+                        uint8_t angle_data [6];
+
+                           //read angle data into angle_data buffer
+                        i2c_burst_read_dt(&bno055, BNO055_ANGLE_DATA_START_REG, angle_data, 6);
+
+
+                        //format the data so that it can be displayed on the screen
+
+                        //angle data
+                        int16_t heading_value = (angle_data[1] << 8) | angle_data[0];
+                        int16_t roll_value = (angle_data[3] << 8)| angle_data[2];
+                        int16_t pitch_value = (angle_data[5] << 8) | angle_data[4];
+
+                        //getting raw values
+
+                        //important value is pitch = 1280
+                        //That is equal to pitch = 80 degrees
+
+                        if(pitch_value >= 1280) {
+                                //user has moved finger up, turn red LED on and start logging angle data for 1.5 seconds
+                                turn_led_on('R');
+                                app_state = APP_STATE_BLE_SENDING_DATA;
+                                
+                                //start timer, since data should only be sent for 1.5 seconds
+                                k_timer_start(&ble_timer, K_MSEC(1500), K_NO_WAIT);
+                                break;
+                        }
+
+                }
+
+
+                while(app_state == APP_STATE_BLE_SENDING_DATA) {
+                        //part where we send data through BLE
+                        
+                        //read sensor data
+                        uint8_t angle_data [6];
+
+                           //read angle data into angle_data buffer
+                        i2c_burst_read_dt(&bno055, BNO055_ANGLE_DATA_START_REG, angle_data, 6);
+
+
+                        //format the data so that it can be displayed on the screen
+
+                        //angle data
+                        int16_t heading_value = (angle_data[1] << 8) | angle_data[0];
+                        int16_t roll_value = (angle_data[3] << 8)| angle_data[2];
+                        int16_t pitch_value = (angle_data[5] << 8) | angle_data[4];
+                }
+        }
+}
+
+K_THREAD_DEFINE(bno055_thread, 1024, bno055_thread_handler, NULL, NULL, NULL, 7, 0, 0);
